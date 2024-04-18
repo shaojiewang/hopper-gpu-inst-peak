@@ -16,3 +16,5 @@ sh script/build.sh 80
 ./build/gemm_test
 
 and I got FP32 18 tflops and BF16 35 tflops.
+
+A disassemble code could be find in fma_bench.sass
