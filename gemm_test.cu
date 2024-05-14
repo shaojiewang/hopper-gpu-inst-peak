@@ -9,8 +9,6 @@
 template<class T>
 void gemm_test()
 {
-    T* A;
-    T* B;
     T* C;
     int device_id;
     int num_multi_processors;
@@ -19,9 +17,8 @@ void gemm_test()
     GPU_CHECK_ERROR(cudaDeviceGetAttribute(&num_multi_processors, cudaDevAttrMultiProcessorCount, device_id));
 
     num_multi_processors *= 4;
-    GPU_CHECK_ERROR(cudaMalloc(&A, 4 * cta_size * num_multi_processors));
-    GPU_CHECK_ERROR(cudaMalloc(&B, 4 * cta_size * num_multi_processors));
-    GPU_CHECK_ERROR(cudaMalloc(&C, 4 * cta_size * num_multi_processors));
+    GPU_CHECK_ERROR(cudaMalloc(&C, PARALLEL * 4 * cta_size * num_multi_processors));
+    
 
     // time it
     cudaStream_t c_stream;
@@ -30,7 +27,7 @@ void gemm_test()
     printf("num_multi_processors=%d\n", num_multi_processors);
 
     // warm up
-    invoke_fma_block<T>(A, B, C, num_multi_processors, c_stream);
+    invoke_fma_block<T>(C, num_multi_processors, c_stream);
 
     float ms = 0.0f;
     if constexpr(std::is_same<T, float>::value)
@@ -41,11 +38,14 @@ void gemm_test()
     {
         printf("[bf16] ");
     }
-    TIMEIT(true, 10, ms, c_stream, invoke_fma_block, A, B, C, num_multi_processors, c_stream);
+    else if constexpr(std::is_same<T, half>::value)
+    {
+        printf("[fp16] ");
+    }
+    TIMEIT(true, 10, ms, c_stream, invoke_fma_block, C, num_multi_processors, c_stream);
     float tflop = (float)num_multi_processors * 2 * LOOP_NUM * CUDA_CTA_SIZE * (sizeof(float) / sizeof(T));
     float tflops = tflop / 1024.0 / 1024.0 / (ms * 1000);
     printf("tflops=%f\n", tflops);
-
 }
 
 
@@ -58,6 +58,8 @@ int main(int argc, char* argv[])
 
     gemm_test<float>();
     gemm_test<__nv_bfloat16>();
+    gemm_test<half>();
 
     printf("hello cuda\n");
 }
+
