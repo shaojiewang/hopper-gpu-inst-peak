@@ -17,16 +17,44 @@ template<>
 struct a_vec_type<float, 1>
 {
     using type = float;
+    __device__ __forceinline__ static type init(float v) {
+        return v;
+    }
+    __device__ __forceinline__ static void fma(type& va, type& vb, type& vc) {
+        asm volatile("fma.rn.f32 %0, %1, %2, %3;\n" : "=f"(vc) : "f"(va), "f"(vb), "f"(vc));
+    }
 };
-template<>
-struct a_vec_type<__nv_bfloat16, 1>
-{
-    using type = __nv_bfloat16;
-};
+
 template<>
 struct a_vec_type<__nv_bfloat16, 2>
 {
     using type = __nv_bfloat162;
+    __device__ __forceinline__ static type init(float v) {
+        return __float2bfloat162_rn(v);
+    }
+    __device__ __forceinline__ static void fma(type& va, type& vb, type& vc) {
+        asm volatile("fma.rn.bf16x2 %0, %1, %2, %3;\n" : 
+                     "=r"(reinterpret_cast<uint32_t&>(vc)) : 
+                     "r"(reinterpret_cast<uint32_t&>(va)), 
+                     "r"(reinterpret_cast<uint32_t&>(vb)), 
+                     "r"(reinterpret_cast<uint32_t&>(vc)));
+    }
+};
+
+template<>
+struct a_vec_type<half, 2>
+{
+    using type = half2;
+    __device__ __forceinline__ static type init(float v) {
+        return __float2half2_rn(v);
+    }
+    __device__ __forceinline__ static void fma(type& va, type& vb, type& vc) {
+        asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n" : 
+                     "=r"(reinterpret_cast<uint32_t&>(vc)) : 
+                     "r"(reinterpret_cast<uint32_t&>(va)), 
+                     "r"(reinterpret_cast<uint32_t&>(vb)), 
+                     "r"(reinterpret_cast<uint32_t&>(vc)));
+    }
 };
 
 template<class T>
@@ -35,65 +63,43 @@ struct vector_num
     static constexpr int vec = sizeof(float) / sizeof(T);
 };
 
+#define PARALLEL 16
+
 template<class T>
-__global__ void fma_block(T* a, T* b, T* c)
+__global__ void fma_block(T* c)
 {
     int tidx = threadIdx.x;
     int bidx = blockIdx.x;
-    int offset = bidx * blockDim.x + tidx;
+    int offset = (bidx * blockDim.x + tidx) * PARALLEL;
 
     constexpr int vec = vector_num<T>::vec;
     using vec_type = typename a_vec_type<T, vec>::type;
-    vec_type a_vec; // = reinterpret_cast<vec_type*>(a)[offset];
-    vec_type b_vec; // = reinterpret_cast<vec_type*>(b)[offset];
-    vec_type c_vec;
-
-    if constexpr(std::is_same<vec_type, float>::value)
-    {
-        a_vec = 5.0f;
-        b_vec = 1.0f;
+    vec_type a_vec = reinterpret_cast<vec_type*>(c)[0];
+    vec_type b_vec = reinterpret_cast<vec_type*>(c)[1];
+    vec_type c_vec[PARALLEL];
+    for(int i = 0; i < PARALLEL; ++i) {
+        c_vec[i] = a_vec_type<T, vec>::init(0.f);
     }
-    else if constexpr(std::is_same<vec_type, __nv_bfloat162>::value)
-    {
-        a_vec = __float22bfloat162_rn(make_float2(5.0f, 5.0f));
-        b_vec = __float22bfloat162_rn(make_float2(1.0f, 1.0f));
-    }
-    
-    uint32_t* c_ = reinterpret_cast<uint32_t*>(&c_vec);
-    uint32_t a_ = 1;//*(reinterpret_cast<uint32_t*>(&a_vec));
-    uint32_t b_ = 2;//*(reinterpret_cast<uint32_t*>(&b_vec));
-    uint32_t d_ = 3;//*(reinterpret_cast<uint32_t*>(&b_vec));
-
-    uint16_t a_uint16 = 1;
-    uint16_t b_uint16 = 2;
-    uint16_t* c_uint16 = reinterpret_cast<uint16_t*>(&c_vec);
-
 
 #pragma unroll
-    for(int i = 0; i < LOOP_NUM; i++)
+    for(int n = 0; n < LOOP_NUM / PARALLEL; n++)
     {
-        if constexpr(std::is_same<vec_type, float>::value)
-        {
-            // c_vec += a_vec + b_vec;
-            c_vec = fma(a_vec, b_vec, c_vec);
-        }
-        else if constexpr(std::is_same<vec_type, __nv_bfloat162>::value)
-        {
-            asm volatile("fma.rn.bf16x2 %0, %1, %2, %3;\n" : "=r"(*c_) : "r"(a_), "r"(b_), "r"(*c_));
-            // asm volatile("fma.rn.f32 %0, %1, %2, %3;\n" : "=r"(*c_) : "r"(a_), "r"(b_), "r"(*c_));
-            // asm volatile("fma.rn.f16 %0, %1, %2, %3;\n" : "=h"(*c_uint16) : "h"(a_uint16), "h"(b_uint16), "h"(*c_uint16));
+#pragma unroll
+        for(int i = 0; i < PARALLEL; ++i) {
+            a_vec_type<T, vec>::fma(a_vec, b_vec, c_vec[i]);
         }
     }
-
-    reinterpret_cast<vec_type*>(c)[offset] = c_vec;
-    
+#pragma unroll
+    for(int i = 0; i < PARALLEL; ++i) {
+        reinterpret_cast<vec_type*>(c)[offset + i] = c_vec[i];
+    }    
 }
 
 template <class T>
-void invoke_fma_block(T* a, T* b, T* c, int grid_size, cudaStream_t& stream)
+void invoke_fma_block(T* c, int grid_size, cudaStream_t& stream)
 {
     constexpr int cta_size = CUDA_CTA_SIZE;
     int grid = grid_size;
-    fma_block<T><<<grid, cta_size, 0, stream>>>(a, b, c);
+    fma_block<T><<<grid, cta_size, 0, stream>>>(c);
 }
 
